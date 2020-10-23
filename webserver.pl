@@ -1,112 +1,120 @@
-#!/usr/bin/perl
-use warnings;
-use strict;
-
+#!/usr/bin/env perl
 
 use strict;
-use warnings;
-
 use Socket;
-use IO::Select;
+use IO::Socket;
 
-use threads;
-use threads::shared;
+# Simple web server in Perl
+# Serves out .html files, echos form data
 
+sub parse_form {
+    my $data = $_[0];
+    my %data;
+    foreach (split /&/, $data) {
+        my ($key, $val) = split /=/;
+        $val =~ s/\+/ /g;
+        $val =~ s/%(..)/chr(hex($1))/eg;
+        $data{$key} = $val;}
+    return %data; }
 
-$|  = 1;
+# Setup and create socket
 
-# The following variables should be set within init_webserver_extension
-use vars qw/
- $port_listen
-/;
+my $port = shift;
+defined($port) or die "Usage: $0 portno\n";
 
+my $DOCUMENT_ROOT = $ENV{'HOME'} . "/public_html";
+my $server = new IO::Socket::INET(Proto => 'tcp',
+                                  LocalPort => $port,
+                                  Listen => SOMAXCONN,
+                                  Reuse => 1);
+$server or die "Unable to create server socket: $!" ;
 
-require "http_handler.pl";
-init_webserver_extension();
+# Await requests and handle them as they arrive
 
-local *S;
+while (my $client = $server->accept()) {
+    $client->autoflush(1);
+    my %request = ();
+    my %data;
 
-socket     (S, PF_INET   , SOCK_STREAM , getprotobyname('tcp')) or die "couldn't open socket: $!";
-setsockopt (S, SOL_SOCKET, SO_REUSEADDR, 1);
-bind       (S, sockaddr_in($port_listen, INADDR_ANY));
-listen     (S, 5)                                               or die "don't hear anything:  $!";
+    {
 
-my $ss = IO::Select->new();
-$ss -> add (*S);
+#-------- Read Request ---------------
 
+        local $/ = Socket::CRLF;
+        while (<$client>) {
+            chomp; # Main http request
+            if (/\s*(\w+)\s*([^\s]+)\s*HTTP\/(\d.\d)/) {
+                $request{METHOD} = uc $1;
+                $request{URL} = $2;
+                $request{HTTP_VERSION} = $3;
+            } # Standard headers
+            elsif (/:/) {
+                (my $type, my $val) = split /:/, $_, 2;
+                $type =~ s/^\s+//;
+                foreach ($type, $val) {
+                        s/^\s+//;
+                        s/\s+$//;
+                }
+                $request{lc $type} = $val;
+            } # POST data
+            elsif (/^$/) {
+                read($client, $request{CONTENT}, $request{'content-length'})
+                    if defined $request{'content-length'};
+                last;
+            }
+        }
+    }
 
-while(1) {
-  my @connections_pending = $ss->can_read();
-  foreach (@connections_pending) {
-    my $fh;
-    my $remote = accept($fh, $_);
+#-------- SORT OUT METHOD  ---------------
 
-    my($port,$iaddr) = sockaddr_in($remote);
-    my $peeraddress = inet_ntoa($iaddr);
+    if ($request{METHOD} eq 'GET') {
+        if ($request{URL} =~ /(.*)\?(.*)/) {
+                $request{URL} = $1;
+                $request{CONTENT} = $2;
+                %data = parse_form($request{CONTENT});
+        } else {
+                %data = ();
+        }
+        $data{"_method"} = "GET";
+    } elsif ($request{METHOD} eq 'POST') {
+                %data = parse_form($request{CONTENT});
+                $data{"_method"} = "POST";
+    } else {
+        $data{"_method"} = "ERROR";
+    }
 
-    my $t = threads->create(\&new_connection, $fh);
-    $t->detach();
-  }
+#------- Serve file ----------------------
+
+        my $localfile = $DOCUMENT_ROOT.$request{URL};
+
+# Send Response
+        if (open(FILE, "<$localfile")) {
+            print $client "HTTP/1.0 200 OK", Socket::CRLF;
+            print $client "Content-type: text/html", Socket::CRLF;
+            print $client Socket::CRLF;
+            my $buffer;
+            while (read(FILE, $buffer, 4096)) {
+                print $client $buffer;
+            }
+            $data{"_status"} = "200";
+        }
+        else {
+            print $client "HTTP/1.0 404 Not Found", Socket::CRLF;
+            print $client Socket::CRLF;
+            print $client "<html><body>404 Not Found</body></html>";
+            $data{"_status"} = "404";
+        }
+        close(FILE);
+
+# Log Request
+        print ($DOCUMENT_ROOT.$request{URL},"\n");
+        foreach (keys(%data)) {
+                print ("   $_ = $data{$_}\n"); }
+
+# ----------- Close Connection and loop ------------------
+
+    close $client;
 }
 
-sub extract_vars {
-  my $line = shift;
-  my %vars;
+__END__
 
-  foreach my $part (split '&', $line) {
-    $part =~ /^(.*)=(.*)$/;
-
-    my $n = $1;
-    my $v = $2;
-  
-    $n =~ s/%(..)/chr(hex($1))/eg;
-    $v =~ s/%(..)/chr(hex($1))/eg;
-    $vars{$n}=$v;
-  }
-
-  return \%vars;
-}
-
-sub new_connection {
-  my $fh = shift;
-
-  binmode $fh;
-
-  my %req;
-
-  $req{HEADER}={}; 
-
-  my $request_line = <$fh>;
-  my $first_line = "";
-
-  while ($request_line ne "\r\n") {
-     unless ($request_line) {
-       close $fh; 
-     }
-
-     chomp $request_line;
-
-     unless ($first_line) {
-       $first_line = $request_line;
-
-      my @parts = split(" ", $first_line);
-       if (@parts != 3) {
-         close $fh;
-       }
-
-       $req{METHOD} = $parts[0];
-       $req{OBJECT} = $parts[1];
-     }
-     else {
-       my ($name, $value) = split(": ", $request_line);
-       $name       = lc $name;
-       $req{HEADER}{$name} = $value;
-     }
-
-     $request_line = <$fh>;
-  }
-
-  http_request_handler($fh, \%req);
-
-  close $fh;
-}
