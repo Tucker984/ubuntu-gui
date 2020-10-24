@@ -19,3 +19,8 @@ sudo apt-get -y install python3-pip
 sudo apt install build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev wget
 echo "installing xterm module"
 npm install xterm
+echo "installing python-tk"
+sudo apt-get install python-tk
+echo "installing SQLite3"
+pip install bcrypt
+echo "install complete"
